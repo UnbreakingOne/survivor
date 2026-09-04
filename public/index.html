@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Survivor Arena Multiplayer</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0a0a0c;color:#fff;font-family:Segoe UI,sans-serif;overflow:hidden;user-select:none}
+canvas{display:block;background:#0a0a0c}
+#ui{display:none;position:absolute;top:15px;left:15px;pointer-events:none;text-shadow:2px 2px 4px #000;z-index:5}
+.stat{margin-bottom:8px;font-size:20px;font-weight:bold;letter-spacing:1px}
+#lvl{color:#00ffcc}#xp{color:#ff00ff}
+#status{font-size:14px;color:#aaa}
+.overlay{display:none;position:absolute;inset:0;background:rgba(10,10,12,.86);backdrop-filter:blur(5px);flex-direction:column;justify-content:center;align-items:center;z-index:10}
+.overlay h1{color:#fff;font-size:50px;margin:0 0 25px;text-shadow:0 0 20px #00ffcc;letter-spacing:3px;text-align:center}
+.input-group{margin-bottom:18px;display:flex;flex-direction:column;align-items:center;gap:9px}
+.input-group label{font-size:18px;color:#ccc}
+input[type=text]{background:rgba(0,0,0,.5);border:2px solid #00ffcc;color:white;padding:10px 15px;font-size:18px;border-radius:8px;outline:none;text-align:center}
+input[type=color]{border:0;background:transparent;width:60px;height:60px;cursor:pointer}
+.btn{background:transparent;border:2px solid #00ffcc;color:#00ffcc;padding:13px 34px;font-size:22px;font-weight:bold;border-radius:8px;cursor:pointer;margin-top:18px;text-transform:uppercase}
+.btn:hover{background:#00ffcc;color:#000;box-shadow:0 0 20px #00ffcc}
+.choices-container{display:flex;gap:18px;flex-wrap:wrap;justify-content:center;max-width:900px}
+.choice-card{background:rgba(20,20,25,.95);border:2px solid #333;border-radius:12px;width:200px;padding:18px;text-align:center;cursor:pointer;transition:.2s;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.choice-card:hover{transform:translateY(-8px) scale(1.04);border-color:#00ffcc;box-shadow:0 0 20px rgba(0,255,204,.35)}
+.choice-title{font-size:20px;font-weight:bold;color:#00ffcc;margin-bottom:10px}
+.choice-desc{font-size:13px;color:#ccc;height:56px;line-height:1.35}
+.choice-level{font-size:12px;color:#777;text-transform:uppercase;margin-top:8px}
+#gameOverScreen h1{color:#ff0055;text-shadow:0 0 20px #ff0055;font-size:64px}
+.small{font-size:14px;color:#aaa;text-align:center;max-width:650px;line-height:1.5}
+#playersPanel{position:absolute;top:15px;right:15px;z-index:5;pointer-events:none;text-align:right;color:#ddd;font-size:13px}
+.playerLine{margin-bottom:4px}
+.me{font-weight:bold}
+</style>
+</head>
+<body>
+<div id="ui">
+  <div class="stat">Level: <span id="lvl">1</span></div>
+  <div class="stat">XP: <span id="xp">0</span> / <span id="nextLvl">75</span></div>
+  <div class="stat" style="color:#ffaa00;font-size:16px">Time: <span id="time">0:00</span></div>
+  <div id="status">Connecting...</div>
+</div>
+<div id="playersPanel"></div>
+
+<div id="startMenu" class="overlay" style="display:flex">
+  <h1>SURVIVOR ARENA<br><span style="font-size:25px;color:#00ffcc">MULTIPLAYER</span></h1>
+  <div class="input-group">
+    <label for="usernameInput">Enter Username</label>
+    <input type="text" id="usernameInput" placeholder="Player" maxlength="12">
+  </div>
+  <div class="input-group">
+    <label for="colorInput">Choose Your Aura</label>
+    <input type="color" id="colorInput" value="#00ffcc">
+  </div>
+  <div class="small">WASD to move • SPACE to dash • P or ESC to pause<br>Everyone shares the same enemy swarm. There are no bosses.</div>
+  <button class="btn" id="startBtn">JOIN ARENA</button>
+</div>
+
+<div id="pauseMenu" class="overlay">
+  <h1>PAUSED</h1>
+  <button class="btn" id="resumeBtn">RESUME</button>
+</div>
+
+<div id="levelUpMenu" class="overlay">
+  <h1>POWER UP</h1>
+  <div class="choices-container" id="choicesBox"></div>
+</div>
+
+<div id="gameOverScreen" class="overlay">
+  <h1>YOU HAVE FADED</h1>
+  <div class="stat">Respawning...</div>
+  <button class="btn" id="restartBtn">REJOIN</button>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const canvas=document.getElementById("gameCanvas"),ctx=canvas.getContext("2d");
+const socket=io();
+const WORLD_SIZE=4000;
+let camera={x:0,y:0},gameState="START",myId=null,frame=0,localTime=0;
+let state={players:[],enemies:[],gems:[],foods:[],vacuums:[],projectiles:[],time:0,difficulty:1};
+let keys={},lastInput={};
+let myPlayer=null;
+
+const UPGRADE_DATA={
+ maxHp:{name:"Vitality Core",desc:"Increase Max HP by 25.",max:10},
+ regen:{name:"Nanobot Swarm",desc:"Passively regenerate health.",max:5},
+ speed:{name:"Hyper Thrusters",desc:"Move significantly faster.",max:5},
+ magnet:{name:"Gravity Well",desc:"Pull XP gems and food from further away.",max:8},
+ gunDamage:{name:"Plasma Rounds",desc:"Basic shots deal more damage.",max:10},
+ gunSpeed:{name:"Overclock",desc:"Fire projectiles much faster.",max:6},
+ multiShot:{name:"Splitter Barrel",desc:"Fire an extra projectile in a spread.",max:4},
+ pierce:{name:"Railgun Tech",desc:"Projectiles pass through +1 enemy.",max:4},
+ crit:{name:"Weakpoint Scanner",desc:"+10% chance to deal 3x damage.",max:5},
+ forceField:{name:"Aegis Aura",desc:"Unlock/upgrade damaging energy ring.",max:8},
+ sparkDrone:{name:"Spark Drone",desc:"Unlock/upgrade an AoE lightning blast.",max:6},
+ buzzsaw:{name:"Orbital Saws",desc:"Unlock/upgrade spinning blades around you.",max:6},
+ knightPet:{name:"Holo-Knight",desc:"Summon a sword bot. Speed scales with yours.",max:5}
+};
+
+function resize(){canvas.width=innerWidth;canvas.height=innerHeight}
+addEventListener("resize",resize);resize();
+
+function startGame(){
+  const name=(document.getElementById("usernameInput").value.trim()||"Player").slice(0,12);
+  const color=document.getElementById("colorInput").value;
+  socket.emit("join",{name,color});
+}
+document.getElementById("startBtn").onclick=startGame;
+document.getElementById("resumeBtn").onclick=togglePause;
+document.getElementById("restartBtn").onclick=()=>{document.getElementById("gameOverScreen").style.display="none";socket.emit("restart");gameState="PLAYING"};
+
+socket.on("joined",data=>{
+  myId=data.id; myPlayer=data.player; gameState="PLAYING";
+  document.getElementById("startMenu").style.display="none";
+  document.getElementById("ui").style.display="block";
+});
+socket.on("state",s=>{
+  state=s;
+  myPlayer=state.players.find(p=>p.id===myId)||myPlayer;
+  if(myPlayer && myPlayer.hp<=0) gameState="GAMEOVER";
+  if(myPlayer && myPlayer.pendingLevelUps>0 && gameState==="PLAYING") showLevelUp();
+  updateUI();
+});
+socket.on("playerRespawned",()=>{
+  gameState="PLAYING";
+  document.getElementById("gameOverScreen").style.display="none";
+});
+
+addEventListener("keydown",e=>{
+  keys[e.code]=true;
+  if(e.code==="Escape"||e.code==="KeyP")togglePause();
+});
+addEventListener("keyup",e=>keys[e.code]=false);
+
+function togglePause(){
+  if(gameState==="PLAYING"){
+    gameState="PAUSED";document.getElementById("pauseMenu").style.display="flex";
+  }else if(gameState==="PAUSED"){
+    gameState="PLAYING";document.getElementById("pauseMenu").style.display="none";
+  }
+}
+
+function sendInput(){
+  if(!myPlayer||gameState!=="PLAYING")return;
+  const input={
+    up:!!keys.KeyW,down:!!keys.KeyS,left:!!keys.KeyA,right:!!keys.KeyD,dash:!!keys.Space
+  };
+  const same=JSON.stringify(input)===JSON.stringify(lastInput);
+  if(!same){socket.emit("input",input);lastInput=input}
+}
+setInterval(sendInput,40);
+
+function showLevelUp(){
+  if(gameState==="LEVELUP")return;
+  gameState="LEVELUP";
+  const box=document.getElementById("choicesBox");box.innerHTML="";
+  const levels=(myPlayer&&myPlayer.upgrades)||{};
+  let available=Object.keys(UPGRADE_DATA).filter(k=>(levels[k]||0)<UPGRADE_DATA[k].max);
+  available.sort(()=>Math.random()-.5);
+  available.slice(0,3).forEach(key=>{
+    const u=UPGRADE_DATA[key],lvl=(levels[key]||0)+1;
+    const card=document.createElement("div");card.className="choice-card";
+    card.innerHTML=`<div class="choice-title">${u.name}</div><div class="choice-desc">${u.desc}</div><div class="choice-level">Level ${lvl}</div>`;
+    card.onclick=()=>{socket.emit("upgrade",key);document.getElementById("levelUpMenu").style.display="none";gameState="PLAYING"};
+    box.appendChild(card);
+  });
+  document.getElementById("levelUpMenu").style.display="flex";
+}
+
+function updateUI(){
+  if(!myPlayer)return;
+  document.getElementById("lvl").textContent=myPlayer.lvl;
+  document.getElementById("xp").textContent=Math.floor(myPlayer.xp);
+  document.getElementById("nextLvl").textContent=myPlayer.nextLvl;
+  const secs=state.time||0;
+  document.getElementById("time").textContent=`${Math.floor(secs/60)}:${String(secs%60).padStart(2,"0")}`;
+  document.getElementById("status").textContent=`${state.players.length} player${state.players.length===1?"":"s"} online`;
+  const panel=document.getElementById("playersPanel");
+  panel.innerHTML=state.players.map(p=>`<div class="playerLine ${p.id===myId?"me":""}" style="color:${p.color}">${escapeHtml(p.name)} · Lv ${p.lvl}</div>`).join("");
+  if(myPlayer.hp<=0){
+    document.getElementById("gameOverScreen").style.display="flex";
+  }
+}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]))}
+
+function drawHealthBar(x,y,hp,maxHp,w,h,off){
+  if(hp>=maxHp)return;
+  ctx.fillStyle="rgba(0,0,0,.8)";ctx.fillRect(x-w/2,y-off,w,h);
+  ctx.fillStyle=hp>maxHp*.3?"#00ffcc":"#ff0055";
+  ctx.fillRect(x-w/2,y-off,w*Math.max(0,hp/maxHp),h);
+}
+function drawMinimap(){
+  const size=160,pad=20,x=canvas.width-size-pad,y=canvas.height-size-pad,scale=size/WORLD_SIZE;
+  ctx.fillStyle="rgba(10,10,15,.8)";ctx.strokeStyle="#333";ctx.lineWidth=2;
+  ctx.fillRect(x,y,size,size);ctx.strokeRect(x,y,size,size);
+  ctx.fillStyle="#ff00ff";state.gems.forEach(g=>ctx.fillRect(x+g.x*scale,y+g.y*scale,1.5,1.5));
+  ctx.fillStyle="#00ff00";state.foods.forEach(f=>ctx.fillRect(x+f.x*scale,y+f.y*scale,3,3));
+  ctx.fillStyle="#00ffff";state.vacuums.forEach(v=>ctx.fillRect(x+v.x*scale-1.5,y+v.y*scale-1.5,3,3));
+  state.enemies.forEach(e=>{ctx.fillStyle="#ff0055";ctx.fillRect(x+e.x*scale-1,y+e.y*scale-1,2,2)});
+  state.players.forEach(p=>{
+    ctx.fillStyle=p.color;ctx.beginPath();ctx.arc(x+p.x*scale,y+p.y*scale,p.id===myId?3:2,0,Math.PI*2);ctx.fill();
+  });
+}
+
+function draw(){
+  frame++;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  const p=myPlayer||state.players[0];
+  if(p){camera.x=p.x-canvas.width/2;camera.y=p.y-canvas.height/2}
+  else{camera.x=WORLD_SIZE/2-canvas.width/2;camera.y=WORLD_SIZE/2-canvas.height/2}
+  camera.x=Math.max(0,Math.min(WORLD_SIZE-canvas.width,camera.x));
+  camera.y=Math.max(0,Math.min(WORLD_SIZE-canvas.height,camera.y));
+
+  ctx.save();ctx.translate(-camera.x,-camera.y);
+  ctx.beginPath();ctx.rect(0,0,WORLD_SIZE,WORLD_SIZE);ctx.clip();
+  ctx.strokeStyle="#1a1a24";ctx.lineWidth=2;
+  const sx=Math.floor(camera.x/100)*100,sy=Math.floor(camera.y/100)*100;
+  for(let x=sx;x<camera.x+canvas.width+100;x+=100){ctx.beginPath();ctx.moveTo(x,camera.y);ctx.lineTo(x,camera.y+canvas.height);ctx.stroke()}
+  for(let y=sy;y<camera.y+canvas.height+100;y+=100){ctx.beginPath();ctx.moveTo(camera.x,y);ctx.lineTo(camera.x+canvas.width,y);ctx.stroke()}
+  ctx.strokeStyle="#ff0055";ctx.lineWidth=4;ctx.strokeRect(0,0,WORLD_SIZE,WORLD_SIZE);
+
+  ctx.fillStyle="#00ff00";ctx.shadowBlur=15;ctx.shadowColor="#00ff00";
+  state.foods.forEach(f=>{ctx.fillRect(f.x-3,f.y-10,6,20);ctx.fillRect(f.x-10,f.y-3,20,6)});
+  ctx.shadowBlur=0;
+
+  ctx.fillStyle="#00ffff";ctx.shadowBlur=15;ctx.shadowColor="#00ffff";
+  state.vacuums.forEach(v=>{ctx.save();ctx.translate(v.x,v.y);ctx.rotate(frame*.05);ctx.fillRect(-6,-6,12,12);ctx.restore()});
+  ctx.shadowBlur=0;
+
+  ctx.fillStyle="#ff00ff";ctx.shadowBlur=12;ctx.shadowColor="#ff00ff";
+  state.gems.forEach(g=>{ctx.beginPath();ctx.arc(g.x,g.y,g.value>25?8:5,0,Math.PI*2);ctx.fill()});
+  ctx.shadowBlur=0;
+
+  state.enemies.forEach(e=>{
+    ctx.fillStyle="#ff0055";ctx.beginPath();ctx.arc(e.x,e.y,e.radius,0,Math.PI*2);ctx.fill();
+    drawHealthBar(e.x,e.y,e.hp,e.maxHp,34,5,e.radius+8);
+  });
+
+  ctx.fillStyle="#ffff00";ctx.shadowBlur=8;ctx.shadowColor="#ffff00";
+  state.projectiles.forEach(q=>{ctx.beginPath();ctx.arc(q.x,q.y,4,0,Math.PI*2);ctx.fill()});
+  ctx.shadowBlur=0;
+
+  state.players.forEach(p=>{
+    const isMe=p.id===myId;
+    if(p.upgrades?.forceField){
+      const radius=70+(p.upgrades.forceField||0)*15;
+      ctx.globalAlpha=.08;ctx.fillStyle=p.color;ctx.beginPath();ctx.arc(p.x,p.y,radius,0,Math.PI*2);ctx.fill();
+      ctx.globalAlpha=.45;ctx.strokeStyle=p.color;ctx.lineWidth=2;ctx.stroke();ctx.globalAlpha=1;
+    }
+    ctx.fillStyle=p.color;ctx.shadowBlur=isMe?18:10;ctx.shadowColor=p.color;
+    ctx.beginPath();ctx.arc(p.x,p.y,isMe?15:13,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;
+    ctx.font="bold 14px sans-serif";ctx.textAlign="center";ctx.fillStyle="rgba(255,255,255,.8)";
+    ctx.fillText(p.name,p.x,p.y-25);
+    drawHealthBar(p.x,p.y,p.hp,p.maxHp,40,6,28);
+
+    if(p.upgrades?.buzzsaw){
+      const count=p.upgrades.buzzsaw||1;
+      for(let s=0;s<count;s++){
+        const a=frame*.05+Math.PI*2/count*s,sx=p.x+Math.cos(a)*110,sy=p.y+Math.sin(a)*110;
+        ctx.fillStyle="#888";ctx.beginPath();ctx.arc(sx,sy,14,0,Math.PI*2);ctx.fill();
+      }
+    }
+    if(p.upgrades?.knightPet){
+      ctx.fillStyle="#0088ff";ctx.beginPath();ctx.arc(p.x+22,p.y-20,7,0,Math.PI*2);ctx.fill();
+    }
+  });
+  ctx.restore();
+
+  drawMinimap();
+  requestAnimationFrame(draw);
+}
+draw();
+</script>
+</body>
+</html>
